@@ -1,41 +1,49 @@
-# This workflow uses actions that are not certified by GitHub.
-# They are provided by a third-party and are governed by
-# separate terms of service, privacy policy, and support
-# documentation.
-
-name: Kubesec
+name: Build with kaniko
 
 on:
   push:
-    branches: [ "master" ]
-  pull_request:
-    # The branches below must be a subset of the branches above
-    branches: [ "master" ]
-  schedule:
-    - cron: '27 14 * * 5'
+    branches: [ "*" ]
+    paths:
+      - "app/**"
+      - ".github/workflows/build-with-kaniko.yml"
+
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+env:
+  KANIKO_CACHE_ARGS: "--cache=true --cache-copy-layers=true --cache-ttl=24h"
 
 jobs:
-  lint:
-    name: Kubesec
-    runs-on: amg-runner-set
+  build-to-ghcr:
+    runs-on: arc-runner-set # uses self-hosted runner scale set
+    container:
+      image: gcr.io/kaniko-project/executor:v1.20.0-debug # the kaniko image
     permissions:
-      actions: read
-      contents: read
-      security-events: write
+      contents: read # read the repository
+      packages: write # to push to GHCR, omit for other container registry. https://docs.github.com/en/packages/managing-github-packages-using-github-actions-workflows/publishing-and-installing-a-package-with-github-actions#publishing-a-package-using-an-action
+
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - name: Build and Push Image to GHCR with kaniko
+        run: |
+          cat <<EOF > /kaniko/.docker/config.json
+          {
+            "auths": {
+              "ghcr.io": {
+                "auth": "$(echo -n "$GIT_USERNAME:$GIT_PASSWORD" | base64 -w0)"
+              }
+            }
+          }
+          EOF
 
-      - name: Run kubesec scanner
-        uses: controlplaneio/kubesec-action@43d0ddff5ffee89a6bb9f29b64cd865411137b14
-        with:
-          input: file.yaml # specify configuration file to scan here
-          format: template
-          template: template/sarif.tpl
-          output: kubesec-results.sarif
-          exit-code: "0"
+          /kaniko/executor --dockerfile="./app/Dockerfile" \
+            --context="${{ github.repositoryUrl }}#${{ github.ref }}#${{ github.sha }}"  \
+            --destination="$GH_REGISTRY/$IMAGE_NAME:$(echo ${GITHUB_SHA} | head  -c 7)" \
+            ${{ env.KANIKO_CACHE_ARGS }} \
+            --push-retry 5 
+        env: # needed to authenticate to github and download the repo
+          GIT_USERNAME: ${{ github.actor }} 
+          GIT_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          GH_REGISTRY: "ghcr.io"
+          IMAGE_NAME: "${{ github.repository }}/nginx"
 
-      - name: Upload Kubesec scan results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: kubesec-results.sarif
+  
